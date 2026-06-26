@@ -205,8 +205,7 @@ middleware-qa
 middleware-uat
 middleware-prod
 ```
-<img width="1023" height="654" alt="image" src="https://github.com/user-attachments/assets/8d42939d-4eca-4d34-ad42-0755f8792140" />
-
+<img width="1241" height="799" alt="image" src="https://github.com/user-attachments/assets/5a147229-c132-4d22-b7d0-33e22e0cdabd" />
 
 ---
 

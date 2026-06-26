@@ -1,0 +1,187 @@
+pipeline {
+    agent any
+
+    environment {
+        APP_NAME   = 'kafka'
+        CHART      = 'helm/middleware-helm-chart'
+        TAG        = "${params.VERSION.split(' ')[0]}"
+        REGISTRY   = "${params.ECR_REGISTRY.tokenize('/')[0]}"
+        REPOSITORY = "${params.ECR_REGISTRY.tokenize('/').drop(1).join('/')}"
+    }
+
+    stages {
+
+        stage('Cleaning Job Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+
+        stage('Checking Out To Helm Repo') {
+            steps {
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: "*/${params.GIT_BRANCH}" ]],
+                    extensions: [],
+                    userRemoteConfigs: [[
+                        credentialsId: 'suyash_chandra_git',
+                        url: 'https://git.smartbox.in/cicd/cicd.git'
+                    ]]
+                ])
+            }
+        }
+
+        stage('Apply ConfigMaps & Secrets') {
+            when {
+                anyOf {
+                    environment name: 'DEPLOY',   value: 'true'
+                    environment name: 'DRY_RUN',  value: 'true'
+                    environment name: 'UPGRADE',  value: 'true'
+                }
+            }
+            steps {
+                script {
+                    def purposeSuffix = params.PURPOSE.toLowerCase().replace('kafka-', '')
+                    def defaultCm = "helm/values/${NAMESPACE}/middleware/configmap-kafka-log4j.yaml"
+                    // Use default log4j ConfigMap for any purpose that involves SASL or SSL
+                    def cmFile = defaultCm
+                    if (!(purposeSuffix.contains('sasl') || purposeSuffix.contains('ssl'))) {
+                        cmFile = "helm/values/${NAMESPACE}/middleware/configmap-kafka-log4j-${purposeSuffix}.yaml"
+                    }
+                    sh """
+                    kubectl config use-context ${CLUSTER_CONTEXT}
+                    kubectl apply -f helm/values/${NAMESPACE}/middleware/configmap-kafka-config.yaml -n ${NAMESPACE}
+                    kubectl apply -f ${cmFile} -n ${NAMESPACE}
+                    kubectl apply -f helm/values/${NAMESPACE}/middleware/configmap-kafka-jmx.yaml -n ${NAMESPACE}
+                    """
+                    if (purposeSuffix.contains('ssl')) {
+                        def sslSecretFile = "helm/values/${NAMESPACE}/middleware/secret-kafka-ssl.yaml"
+                        if (fileExists(sslSecretFile)) {
+                            sh "kubectl apply -f ${sslSecretFile} -n ${NAMESPACE}"
+                        } else {
+                            echo "SSL secret manifest not found: ${sslSecretFile}. Skipping kafka-ssl-secret creation."
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Kafka Deployment') {
+            when {
+                anyOf {
+                    environment name: 'DEPLOY',   value: 'true'
+                    environment name: 'DRY_RUN',  value: 'true'
+                }
+            }
+            steps {
+                script {
+                    sh "kubectl config use-context ${CLUSTER_CONTEXT}"
+
+                    // Derive values file from PURPOSE: Kafka-General -> kafka-general.yaml
+                    def purposeSuffix = params.PURPOSE.toLowerCase().replace('kafka-', '')
+                    def valuesFile    = "helm/values/${NAMESPACE}/middleware/kafka-${purposeSuffix}.yaml"
+
+                    if (env.DRY_RUN == 'true') {
+                        sh """
+                        helm upgrade --install ${env.APP_NAME} ${env.CHART} \
+                        --wait --timeout 5m \
+                        -f ${valuesFile} \
+                        -n ${NAMESPACE} \
+                        --dry-run --debug \
+                        --set global.security.allowInsecureImages=true \
+                        --set image.registry=${env.REGISTRY} \
+                        --set image.repository=${env.REPOSITORY} \
+                        --set image.tag=${env.TAG}
+                        """
+                    } else if (env.DEPLOY == 'true') {
+                        sh """
+                        helm upgrade --install ${env.APP_NAME} ${env.CHART} \
+                        --wait --timeout 5m \
+                        -f ${valuesFile} \
+                        -n ${NAMESPACE} \
+                        --set global.security.allowInsecureImages=true \
+                        --set image.registry=${env.REGISTRY} \
+                        --set image.repository=${env.REPOSITORY} \
+                        --set image.tag=${env.TAG}
+                        """
+                    } else {
+                        echo "Neither DRY_RUN nor DEPLOY selected. Skipping deployment."
+                    }
+                }
+            }
+        }
+
+        stage('Upgrade Kafka Deployment') {
+            when {
+                allOf {
+                    environment name: 'DEPLOY',   value: 'false'
+                    environment name: 'DRY_RUN',  value: 'false'
+                    environment name: 'UPGRADE',  value: 'true'
+                }
+            }
+            steps {
+                script {
+                    def purposeSuffix = params.PURPOSE.toLowerCase().replace('kafka-', '')
+                    def valuesFile    = "helm/values/${NAMESPACE}/middleware/kafka-${purposeSuffix}.yaml"
+
+                    sh """
+                    kubectl config use-context ${CLUSTER_CONTEXT}
+                    helm upgrade --install ${env.APP_NAME} ${env.CHART} \
+                        --wait --timeout 5m \
+                    -f ${valuesFile} \
+                    -n ${NAMESPACE} \
+                    --set global.security.allowInsecureImages=true \
+                    --set image.registry=${env.REGISTRY} \
+                    --set image.repository=${env.REPOSITORY} \
+                    --set image.tag=${env.TAG}
+                    """
+                }
+            }
+        }
+
+        stage('Rollback Kafka Deployment') {
+            when {
+                allOf {
+                    environment name: 'DEPLOY',    value: 'false'
+                    environment name: 'DRY_RUN',   value: 'false'
+                    environment name: 'UPGRADE',   value: 'false'
+                    environment name: 'UNINSTALL', value: 'false'
+                    environment name: 'ROLLBACK',  value: 'true'
+                }
+            }
+            steps {
+                sh """
+                kubectl config use-context ${CLUSTER_CONTEXT}
+                helm rollback ${env.APP_NAME} ${params.ROLLBACK_VERSION} -n ${NAMESPACE}
+                """
+            }
+        }
+
+        stage('Uninstall Kafka Deployment') {
+            when {
+                allOf {
+                    environment name: 'DEPLOY',    value: 'false'
+                    environment name: 'DRY_RUN',   value: 'false'
+                    environment name: 'UPGRADE',   value: 'false'
+                    environment name: 'UNINSTALL', value: 'true'
+                }
+            }
+            steps {
+                sh """
+                kubectl config use-context ${CLUSTER_CONTEXT}
+                helm uninstall ${env.APP_NAME} -n ${NAMESPACE}
+                """
+            }
+        }
+
+        stage('Helm Release History') {
+            steps {
+                sh """
+                kubectl config use-context ${CLUSTER_CONTEXT}
+                helm history ${env.APP_NAME} -n ${NAMESPACE}
+                """
+            }
+        }
+
+    }
+}

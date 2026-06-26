@@ -6,6 +6,7 @@
 This repository automates the deployment, upgrade, downgrade, and rollback of middleware components running on Kubernetes.
 
 The automation is designed to provide a consistent and repeatable deployment process while allowing operators to select different middleware versions based on project requirements.
+<img width="1416" height="737" alt="image" src="https://github.com/user-attachments/assets/4fcc5902-ece0-42f7-9099-25edd0aa43dd" />
 
 ---
 
